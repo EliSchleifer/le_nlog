@@ -54,10 +54,10 @@ using NLog.Layouts;
 using NLog.Targets;
 using System.Text;
 
-namespace Le
+namespace NLog.Targets
 {
     [Target("Logentries")]
-    public sealed class LeTarget : TargetWithLayout
+    public sealed class LogEntriesTarget : TargetWithLayout
     {
         /*
          * Constants
@@ -83,10 +83,10 @@ namespace Le
         static readonly String CONFIG_TOKEN = "LOGENTRIES_TOKEN";
         /** Error message displayed when invalid token is detected. */
         static readonly String INVALID_TOKEN = "\n\nIt appears your LOGENTRIES_TOKEN parameter in web/app.config is invalid!\n\n";
-        
+
         readonly Random random = new Random();
 
-	  //Custom socket class to allow for choice of SSL
+        //Custom socket class to allow for choice of SSL
         private TcpClient client = null;
         private Stream sock = null;
         public Thread thread;
@@ -95,18 +95,25 @@ namespace Le
         /** Message Queue. */
         public BlockingCollection<byte[]> queue;
 
-        public LeTarget()
+        public LogEntriesTarget()
+            : this(null)
+        {
+            this.token = this.SubstituteAppSetting(CONFIG_TOKEN);
+        }
+
+        public LogEntriesTarget(string token)
         {
             queue = new BlockingCollection<byte[]>(QUEUE_SIZE);
-            
+
             thread = new Thread(new ThreadStart(run_loop));
             thread.Name = "Logentries NLog Target";
             thread.IsBackground = true;
         }
+
         /** Debug flag. */
         [RequiredParameter]
         public bool Debug { get; set; }
-       
+
         public bool KeepConnection { get; set; }
 
         private void openConnection()
@@ -117,8 +124,6 @@ namespace Le
                 this.client.NoDelay = true;
 
                 this.sock = this.client.GetStream();
-
-                this.token = this.SubstituteAppSetting(CONFIG_TOKEN);
             }
             catch
             {
@@ -139,7 +144,7 @@ namespace Le
 
                     return;
                 }
-                catch(Exception e)
+                catch (Exception e)
                 {
                     if (Debug)
                     {
@@ -165,7 +170,7 @@ namespace Le
 
         private void closeConnection()
         {
-            if(this.client != null)
+            if (this.client != null)
                 this.client.Close();
         }
 
@@ -212,7 +217,7 @@ namespace Le
         {
             WriteDebugMessages("Queueing " + line);
 
-            byte[] data = UTF8.GetBytes(this.token + line+'\n');
+            byte[] data = UTF8.GetBytes(this.token + line + '\n');
 
             //Try to append data to queue
             bool is_full = !queue.TryAdd(data);
@@ -250,7 +255,7 @@ namespace Le
             }
             if (!started)
             {
-                WriteDebugMessages("Starting Logentries asynchronous socket client"); 
+                WriteDebugMessages("Starting Logentries asynchronous socket client");
                 thread.Start();
                 started = true;
             }
@@ -258,15 +263,16 @@ namespace Le
             //Append message content
             addLine(this.Layout.Render(logEvent));
 
-			try{
-				String excep = logEvent.Exception.ToString();
-				if(excep.Length > 0)
-				{
-					excep = excep.Replace('\n', '\u2028');
-					addLine(excep);
-				}
-			}
-			catch{ }
+            try
+            {
+                String excep = logEvent.Exception.ToString();
+                if (excep.Length > 0)
+                {
+                    excep = excep.Replace('\n', '\u2028');
+                    addLine(excep);
+                }
+            }
+            catch { }
         }
 
         protected override void CloseTarget()
@@ -276,18 +282,18 @@ namespace Le
             thread.Interrupt();
             //Debug message
         }
-		
-		//Used for UnitTests, write method is protected
-		public void TestWrite(LogEventInfo logEvent)
-		{
-			this.Write(logEvent);
-		}
-		
-		//Used for UnitTests, CloseTarget method is protected
-		public void TestClose()
-		{
-			this.CloseTarget();
-		}
+
+        //Used for UnitTests, write method is protected
+        public void TestWrite(LogEventInfo logEvent)
+        {
+            this.Write(logEvent);
+        }
+
+        //Used for UnitTests, CloseTarget method is protected
+        public void TestClose()
+        {
+            this.CloseTarget();
+        }
 
         private void WriteDebugMessages(string message, Exception e)
         {
@@ -319,7 +325,9 @@ namespace Le
             if (appSettings.HasKeys() && appSettings.AllKeys.Contains(key))
             {
                 return appSettings[key];
-            }else{
+            }
+            else
+            {
                 return key;
             }
         }

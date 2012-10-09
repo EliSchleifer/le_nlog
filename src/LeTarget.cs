@@ -66,64 +66,72 @@ namespace NLog.Targets
         /** Size of the internal event queue. */
         public static readonly int QUEUE_SIZE = 32768;
         /** Logentries API server address. */
-        static readonly String LE_API = "api.logentries.com";
+        private const string LogEntriesUri = "api.logentries.com";
         /** Port number for token logging on Logentries API server. */
-        static readonly int LE_PORT = 10000;
+        private const int LE_PORT = 10000;
         /** UTF-8 output character set. */
-        static readonly UTF8Encoding UTF8 = new UTF8Encoding();
+        private static readonly UTF8Encoding UTF8 = new UTF8Encoding();
         /** ASCII character set used by HTTP. */
-        static readonly ASCIIEncoding ASCII = new ASCIIEncoding();
+        private static readonly ASCIIEncoding ASCII = new ASCIIEncoding();
         /** Minimal delay between attempts to reconnect in milliseconds. */
-        static readonly int MIN_DELAY = 100;
+        private const int MIN_DELAY = 100;
         /** Maximal delay between attempts to reconnect in milliseconds. */
-        static readonly int MAX_DELAY = 10000;
+        private const int MAX_DELAY = 10000;
         /** LE appender signature - used for debugging messages. */
-        static readonly String LE = "LE: ";
+        private const string LE = "LE: ";
         /** Logentries Config Key */
-        static readonly String CONFIG_TOKEN = "LOGENTRIES_TOKEN";
+        private const string CONFIG_TOKEN = "LOGENTRIES_TOKEN";
         /** Error message displayed when invalid token is detected. */
-        static readonly String INVALID_TOKEN = "\n\nIt appears your LOGENTRIES_TOKEN parameter in web/app.config is invalid!\n\n";
+        private const string INVALID_TOKEN = "\n\nIt appears your LOGENTRIES_TOKEN parameter in web/app.config is invalid!\n\n";
 
-        readonly Random random = new Random();
+        private readonly Random random = new Random();
 
         //Custom socket class to allow for choice of SSL
         private TcpClient client = null;
-        private Stream sock = null;
+        private Stream socket = null;
         public Thread thread;
         public bool started = false;
-        private String token = null;
+        private String token = "SET_TOKEN_TO_LOG_TO_SERVICE";
         /** Message Queue. */
         public BlockingCollection<byte[]> queue;
 
         public LogEntriesTarget()
             : this(null)
         {
-            this.token = this.SubstituteAppSetting(CONFIG_TOKEN);
+            var settings = ConfigurationManager.AppSettings;
+            if (settings.HasKeys() && settings.AllKeys.Contains(CONFIG_TOKEN))
+            {
+                this.token = settings[CONFIG_TOKEN];
+            }
+            else
+            {
+                WriteToDebug("Configuration missing LOGENTRIES_TOKEN value, logger will not work");
+            }
         }
 
         public LogEntriesTarget(string token)
         {
             queue = new BlockingCollection<byte[]>(QUEUE_SIZE);
 
-            thread = new Thread(new ThreadStart(run_loop));
+            thread = new Thread(new ThreadStart(RunLoop));
             thread.Name = "Logentries NLog Target";
             thread.IsBackground = true;
+
+            this.token = token;
         }
 
         /** Debug flag. */
         [RequiredParameter]
         public bool Debug { get; set; }
 
-        public bool KeepConnection { get; set; }
-
-        private void openConnection()
+        private void OpenConnection()
         {
             try
             {
-                this.client = new TcpClient(LE_API, LE_PORT);
+                this.client = new TcpClient(LogEntriesUri, LE_PORT);
                 this.client.NoDelay = true;
 
-                this.sock = this.client.GetStream();
+                this.socket = this.client.GetStream();
             }
             catch
             {
@@ -131,24 +139,24 @@ namespace NLog.Targets
             }
         }
 
-        private void reopenConnection()
+        private void ReopenConnection()
         {
-            closeConnection();
+            CloseConnection();
 
             int root_delay = MIN_DELAY;
             while (true)
             {
                 try
                 {
-                    openConnection();
-
+                    OpenConnection();
                     return;
                 }
                 catch (Exception e)
                 {
                     if (Debug)
                     {
-                        WriteDebugMessages("Unable to connect to Logentries", e);
+                        WriteToDebug("Unable to connect to Logentries");
+                        WriteToDebug(e.ToString());
                     }
                 }
 
@@ -168,62 +176,95 @@ namespace NLog.Targets
             }
         }
 
-        private void closeConnection()
+        private void CloseConnection()
         {
             if (this.client != null)
+            {
                 this.client.Close();
+            }
         }
 
-        public void run_loop()
+        public void RunLoop()
         {
             try
             {
                 // Open connection
-                reopenConnection();
+                ReopenConnection();
 
                 // Send data in queue
                 while (true)
                 {
-                    //Take data from queue
-                    byte[] data = queue.Take();
 
-                    //Send data, reconnect if needed
-                    while (true)
+                    // Block until data shows up in the queue
+                    byte[] data = queue.Take();
+                    int count = queue.Count;
+
+                    while (count > 0)
                     {
-                        try
-                        {
-                            this.sock.Write(data, 0, data.Length);
-                            this.sock.Flush();
-                        }
-                        catch (IOException e)
-                        {
-                            //Reopen the lost connection
-                            reopenConnection();
-                            continue;
-                        }
-                        break;
+                        Write(data);
+                        data = queue.Take();
+                        count--;
                     }
+                    Flush();
                 }
             }
             catch (ThreadInterruptedException e)
             {
-                WriteDebugMessages("Logentries asynchronous socket interrupted");
+                WriteToDebug("Logentries asynchronous socket interrupted");
             }
 
-            closeConnection();
+            CloseConnection();
         }
 
-        private void addLine(String line)
+        /// <summary>
+        /// Reliably write bytes to service
+        /// </summary>
+        /// <param name="data"></param>
+        private void Write(byte[] data)
         {
-            WriteDebugMessages("Queueing " + line);
+            while (true)
+            {
+                try
+                {
+                    this.socket.Write(data, 0, data.Length);
+                    data = queue.Take();
+                }
+                catch (IOException)
+                {
+                    // Reopen the lost connection
+                    ReopenConnection();
+                    continue;
+                }
+                break;
+            }
+        }
+
+        /// <summary>
+        /// Flush pipe to service
+        /// </summary>
+        private void Flush()
+        {
+            try
+            {
+                this.socket.Flush();
+            }
+            catch (IOException)
+            {
+                ReopenConnection();
+            }
+        }
+
+        private void EnqueueLine(string line)
+        {
+            WriteToDebug("Queueing " + line);
 
             byte[] data = UTF8.GetBytes(this.token + line + '\n');
 
             //Try to append data to queue
-            bool is_full = !queue.TryAdd(data);
+            bool isFull = !queue.TryAdd(data);
 
             //If it's full, remove latest item and try again
-            if (is_full)
+            if (isFull)
             {
                 queue.Take();
                 queue.TryAdd(data);
@@ -232,15 +273,15 @@ namespace NLog.Targets
 
         private bool checkCredentials()
         {
-            var appSettings = ConfigurationManager.AppSettings;
-            if (!appSettings.AllKeys.Contains(CONFIG_TOKEN))
-                return false;
-            if (appSettings[CONFIG_TOKEN] == "")
-                return false;
-            System.Guid newGuid = System.Guid.NewGuid();
-            if (!System.Guid.TryParse(appSettings[CONFIG_TOKEN], out newGuid))
+            if (string.IsNullOrEmpty(this.token))
             {
-                WriteDebugMessages(INVALID_TOKEN);
+                return false;
+            }
+
+            Guid guid;
+            if (!Guid.TryParse(this.token, out guid))
+            {
+                WriteToDebug(INVALID_TOKEN);
                 return false;
             }
             return true;
@@ -250,86 +291,43 @@ namespace NLog.Targets
         {
             if (!checkCredentials())
             {
-                WriteDebugMessages(INVALID_TOKEN);
+                WriteToDebug(INVALID_TOKEN);
                 return;
             }
             if (!started)
             {
-                WriteDebugMessages("Starting Logentries asynchronous socket client");
+                WriteToDebug("Starting Logentries asynchronous socket client");
                 thread.Start();
                 started = true;
             }
 
             //Append message content
-            addLine(this.Layout.Render(logEvent));
+            EnqueueLine(this.Layout.Render(logEvent));
 
-            try
+            // Write out exception (this should really be using the exception formatter)
+            if (logEvent.Exception != null)
             {
-                String excep = logEvent.Exception.ToString();
-                if (excep.Length > 0)
-                {
-                    excep = excep.Replace('\n', '\u2028');
-                    addLine(excep);
-                }
+                var str = logEvent.Exception.ToString();
+                str = str.Replace('\n', '\u2028');
+                EnqueueLine(str);
             }
-            catch { }
         }
 
         protected override void CloseTarget()
         {
             base.CloseTarget();
-
             thread.Interrupt();
-            //Debug message
         }
 
-        //Used for UnitTests, write method is protected
-        public void TestWrite(LogEventInfo logEvent)
+        private void WriteToDebug(string message)
         {
-            this.Write(logEvent);
-        }
+            if (!this.Debug) { return; }
 
-        //Used for UnitTests, CloseTarget method is protected
-        public void TestClose()
-        {
-            this.CloseTarget();
-        }
-
-        private void WriteDebugMessages(string message, Exception e)
-        {
             message = LE + message;
-            if (!this.Debug) return;
-            string[] messages = { message, e.ToString() };
-            foreach (var msg in messages)
-            {
-                System.Diagnostics.Debug.WriteLine(msg);
-                Console.Error.WriteLine(msg);
-                //Log to NLog's internal logger also
-                InternalLogger.Debug(msg);
-            }
-        }
-
-        private void WriteDebugMessages(string message)
-        {
-            message = LE + message;
-            if (!this.Debug) return;
             System.Diagnostics.Debug.WriteLine(message);
             Console.Error.WriteLine(message);
             //Log to NLog's internal logger also
             InternalLogger.Debug(message);
-        }
-
-        private string SubstituteAppSetting(string key)
-        {
-            var appSettings = ConfigurationManager.AppSettings;
-            if (appSettings.HasKeys() && appSettings.AllKeys.Contains(key))
-            {
-                return appSettings[key];
-            }
-            else
-            {
-                return key;
-            }
         }
     }
 }
